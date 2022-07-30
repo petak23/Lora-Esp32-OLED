@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include "definitions.h"
+#include "pvMeasure.h"
 
 /**
  * Program pre LoRa komunikáciu pomocou ESP32 - prijímač + zobrazenie na OLED
@@ -20,6 +21,11 @@ OLED_CLASS_OBJ display(OLED_ADDRESS, OLED_SDA, OLED_SCL);
 int width;
 int height;
 String meteo[10];
+float temp; // Teplota
+float hum;  // Vlhkosť
+float relp; // Relatívny tlak
+pvMeasure data[100];
+int measureCount = 0;
 
 /* Rozdelenie textu podľa rozdelovača do poľa meteo
  * zdroj: https://forum.arduino.cc/t/how-to-split-a-string-with-space-and-store-the-items-in-array/888813/8 */
@@ -41,6 +47,13 @@ void split(String s, String delimiter)
       s = s.substring(index + 1);
     }
   }
+  temp = meteo[0].substring(3).toFloat();
+  hum = meteo[1].substring(3).toFloat();
+  relp = meteo[3].substring(3).toFloat();
+  data[measureCount].temperature = temp;
+  data[measureCount].humidity = hum;
+  data[measureCount].rel_pressure = relp;
+  measureCount = measureCount < 99 ? measureCount + 1 : 0;
 }
 
 void setup()
@@ -100,19 +113,25 @@ void loop()
       recv = LoRa.readString();
     }
     split(recv, ";");
-    display.clear();
-    display.drawString(width - 60, height, String(meteo[0]));
-    display.drawString(width - 60, height + 10, String(meteo[1]));
-    display.drawString(width - 60, height + 20, String(meteo[2]));
-    display.drawString(width, height, String(meteo[3]));
-    display.drawString(width, height + 10, String(meteo[4]));
-    display.drawString(width, height + 20, String(meteo[5]));
     int rssi = LoRa.packetRssi();
-    String info = "RSSI " + String(rssi) + " -> " + String((int)((10 / 9) * (rssi + 120))) + "%";
-    String snr = "SNR: " + String(LoRa.packetSnr());
-    display.drawString(width - 60, height - 22, info);
-    display.drawString(width - 60, height - 32, snr);
-    display.drawLine(width - 60, height - 5, width + 60, height - 5);
+    int perc = (int)((10 / 9) * (rssi + 120));
+    int barS = (int)(3 * perc / 10);
+    int snr = (LoRa.packetSnr() * 10);
+    int cas = millis() / 1000;
+    String m = ((cas / 60) < 10 ? "0" : "") + String((int)(cas / 60));
+    String s = ((cas % 60) < 10 ? "0" : "") + String((int)(cas % 60));
+
+    display.clear();
+    display.drawString(width - 60, height + 4, "T: " + String(temp));
+    display.drawString(width - 60, height + 13, "H: " + String(hum));
+    display.drawString(width - 60, height + 22, "P: " + String(relp));
+
+    display.drawString(width - 60, height - 22, "RSSI: " + String(rssi) + " (" + String(perc) + "%)");
+    display.drawString(width - 60, height - 32, "SNR: " + String(snr / 10));
+    display.drawString(width - 60, height - 12, "TIME: " + m + ":" + s);
+    display.drawLine(width - 60, height + 2, width, height + 2);
+    display.drawRect(width + 55, height - 32, 8, 34);
+    display.fillRect(width + 57, height - barS, 4, barS);
     display.display();
   }
 }
