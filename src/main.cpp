@@ -10,14 +10,14 @@
 #include "pvMeasure.h"
 
 /**
- * Program pre LoRa komunikáciu pomocou ESP32 - prijímač + zobrazenie na OLED
+ * Program pre LoRa komunikáciu pomocou ESP32 - prijímač + zobrazenie na OLED + MQTT
  *
- * Posledná zmena(last change): 16.04.2023
+ * Posledná zmena(last change): 17.04.2023
  * @author Ing. Peter VOJTECH ml. <petak23@gmail.com>
  * @copyright  Copyright (c) 2022 - 2023 Ing. Peter VOJTECH ml.
  * @license GNU-GPL
  * @link       http://petak23.echo-msz.eu
- * @version 1.0.1
+ * @version 1.0.2
  */
 
 OLED_CLASS_OBJ display(OLED_ADDRESS, OLED_SDA, OLED_SCL);
@@ -41,6 +41,7 @@ unsigned long lastMqttReconectTime = 0; // Uloží posledný čas pokusu o pripo
 int mqtt_state = 0;											// Stav MQTT pripojenia podľa https://pubsubclient.knolleary.net/api#state
 
 pvCrypt *pv_crypr = new pvCrypt();
+bool lastDecodeState = false;
 
 String LoRaData = ""; // Dáta prijaté cez LoRa prenos
 int rssi = -120;			// Sila signálu
@@ -117,8 +118,52 @@ String getOutputStates()
 	return jsonString;
 }
 
+void displayData()
+{
+#if SERIAL_PORT_ENABLED
+	// print RSSI of packet
+	Serial.print("' with RSSI: ");
+	Serial.print(rssi);
+	Serial.print("dBm ");
+	Serial.print((10 / 9) * (rssi + 120));
+	Serial.println("%");
+#endif
+
+	int perc = (int)((10 / 9) * (rssi + 120));
+	int barS = (int)(3 * perc / 10);
+	int snr = (LoRa.packetSnr() * 10);
+	int cas = millis() / 1000;
+	String m = ((cas / 60) < 10 ? "0" : "") + String((int)(cas / 60));
+	String s = ((cas % 60) < 10 ? "0" : "") + String((int)(cas % 60));
+
+	display.clear();
+	if (lastDecodeState)
+	{
+		display.drawString(width - 60, height + 4, "T: " + String(temp));
+		display.drawString(width - 60, height + 13, "H: " + String(hum));
+		display.drawString(width - 60, height + 22, "P: " + String(relp));
+	}
+	else
+	{
+#if SERIAL_PORT_ENABLED
+		Serial.println("Pri dekódovaní došlo k chybe");
+#endif
+		display.drawString(width - 60, height + 4, "Decode Error!");
+	}
+
+	display.drawString(width - 60, height - 22, "RSSI: " + String(rssi) + " (" + String(perc) + "%)");
+	display.drawString(width - 60, height - 32, "SNR: " + String(snr / 10));
+	display.drawString(width - 60, height - 12, "TIME: " + m + ":" + s);
+	display.drawLine(width - 60, height + 2, width, height + 2);
+	display.drawRect(width + 55, height - 32, 8, 34);
+	display.fillRect(width + 57, height - barS, 4, barS);
+	display.drawString(width - 55, height + 20, WiFi.localIP().toString());
+	display.drawString(width + 10, height + 22, mqtt_state == 1 ? "MQTT On" : "MQTT Off");
+	display.display();
+}
+
 /* Ak je chyba dekódovania vráti false inak true */
-bool onLoRaData()
+void onLoRaData()
 {
 	String out = getOutputStates();
 	if (!out.startsWith("#Err"))
@@ -126,32 +171,37 @@ bool onLoRaData()
 		int l_m = out.length() + 1;
 		char tmp_m[l_m];
 		out.toCharArray(tmp_m, l_m);
-		mqttClient.publish(topic_meteo_status, 0, true, tmp_m);
-		// notifyClients(out);
-		return true;
+		mqttClient.publish(topic_meteo_status, 0, true, tmp_m); // Publikuj ncez MQTT
+		lastDecodeState = true;
 	}
 	else
 	{
-		return false;
+		lastDecodeState = false;
 	}
+	displayData(); // Zobraz data na OLED
 }
 
 /* Funkcia pre pripojenie na wifi */
 void connectToWifi()
 {
+#if SERIAL_PORT_ENABLED
 	Serial.print("Connecting to ");
 	Serial.println(WIFI_SSID);
+#endif
 	WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 	while (WiFi.status() != WL_CONNECTED)
 	{
 		delay(500);
+#if SERIAL_PORT_ENABLED
 		Serial.print(".");
+#endif
 	}
-	// Print local IP address and start web server
+#if SERIAL_PORT_ENABLED
 	Serial.println("");
 	Serial.println("WiFi connected.");
 	Serial.println("IP address: ");
 	Serial.println(WiFi.localIP());
+#endif
 }
 
 /* Pripojenie k MQTT brokeru */
@@ -168,7 +218,6 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
 		xTimerStart(mqttReconnectTimer, 0);
 	}
 	mqtt_state = 0; // Nastav príznak chýbajúceho MQTT spojenia
-									// notifyClients(getOutputStates());
 }
 
 /* Spustená pri pripojení k MQTT brokeru */
@@ -178,7 +227,6 @@ void onMqttConnect(bool sessionPresent)
 	mqttClient.subscribe(topic_meteo_last, 1);
 
 	mqtt_state = 1; // Nastav príznak MQTT spojenia
-									// notifyClients(getOutputStates()); // Aktualizuj stavy webu
 }
 
 /* Správa WIFI eventov */
@@ -200,9 +248,11 @@ void WiFiEvent(WiFiEvent_t event)
 
 void onMqttPublish(uint16_t packetId)
 {
+#if SERIAL_PORT_ENABLED
 	Serial.println("Publish acknowledged.");
 	Serial.print("  packetId: ");
 	Serial.println(packetId);
+#endif
 }
 
 /* This functions is executed when some device publishes a message to a topic that your ESP32 is subscribed to
@@ -226,10 +276,10 @@ void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties 
 	if (topicTmp.startsWith(topic_meteo_last))
 	{
 		getOutputStates();
-		// notifyClients(getOutputStates());
 	}
 }
 
+/************************************ SETUP **************************************************/
 void setup()
 {
 #if SERIAL_PORT_ENABLED
@@ -280,16 +330,14 @@ void setup()
 	Serial.println("LoRa Initializing OK!");
 #endif
 
-	if (!LORA_SENDER)
-	{
-		display.clear();
-		display.drawString(width - 50, height - 8, "LoraRecv++ Ready");
-		display.drawString(width - 50, height + 8, "Waiting for data");
-		display.display();
+	// Display initial info
+	display.clear();
+	display.drawString(width - 55, height - 8, LORA_SENDER ? "Lora ++ SEND ++ Ready" : "Lora ++ RECV ++ Ready");
 #if SERIAL_PORT_ENABLED
-		Serial.println("LoraRecv++ Ready");
+	Serial.println(LORA_SENDER ? "Lora ++ SEND ++ Ready" : "Lora ++ RECV ++ Ready");
 #endif
-	}
+	display.drawString(width - 55, height + 8, "Waiting for data...");
+	display.display();
 
 	mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void *)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
 	wifiReconnectTimer = xTimerCreate("wifiTimer", pdMS_TO_TICKS(2000), pdFALSE, (void *)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
@@ -305,66 +353,29 @@ void setup()
 	mqttClient.setCredentials(MQTT_USER, MQTT_PASSWORD);
 
 	connectToWifi();
-
+	display.drawString(width - 55, height + 20, WiFi.localIP().toString());
+	display.display();
+	// Nastav šifrovanie
 	pv_crypr->setInfo((char *)DEVICE_ID, (char *)PASS_PHRASE);
 }
 
-int count = 0;
+/************************************ LOOP **************************************************/
 void loop()
 {
 	// try to parse packet
 	int packetSize = LoRa.parsePacket();
 	if (packetSize)
 	{
+		// Reset premenných
 		LoRaData = "";
 		rssi = -120;
-		// read packet
+
+		// Načítanie paketu
 		while (LoRa.available())
 		{
 			LoRaData = LoRa.readString();
 		}
-		rssi = LoRa.packetRssi();
-		bool state = onLoRaData();
-#if SERIAL_PORT_ENABLED
-		// print RSSI of packet
-		Serial.print("' with RSSI: ");
-		Serial.print(rssi);
-		Serial.print("dBm ");
-		Serial.print((10 / 9) * (rssi + 120));
-		Serial.println("%");
-#endif
-		int rssi = LoRa.packetRssi();
-		int perc = (int)((10 / 9) * (rssi + 120));
-		int barS = (int)(3 * perc / 10);
-		int snr = (LoRa.packetSnr() * 10);
-		int cas = millis() / 1000;
-		String m = ((cas / 60) < 10 ? "0" : "") + String((int)(cas / 60));
-		String s = ((cas % 60) < 10 ? "0" : "") + String((int)(cas % 60));
-
-		display.clear();
-		if (state)
-		{
-			display.drawString(width - 60, height + 4, "T: " + String(temp));
-			display.drawString(width - 60, height + 13, "H: " + String(hum));
-			display.drawString(width - 60, height + 22, "P: " + String(relp));
-		}
-		else
-		{
-#if SERIAL_PORT_ENABLED
-			Serial.println("Pri dekódovaní došlo k chybe");
-#endif
-			display.drawString(width - 60, height + 4, "Decode Error!");
-		}
-
-		display.drawString(width - 60, height - 22, "RSSI: " + String(rssi) + " (" + String(perc) + "%)");
-		display.drawString(width - 60, height - 32, "SNR: " + String(snr / 10));
-		display.drawString(width - 60, height - 12, "TIME: " + m + ":" + s);
-		display.drawLine(width - 60, height + 2, width, height + 2);
-		display.drawRect(width + 55, height - 32, 8, 34);
-		display.fillRect(width + 57, height - barS, 4, barS);
-
-		display.drawString(width - 10, height + 13, WiFi.localIP().toString());
-		display.drawString(width + 10, height + 22, mqtt_state == 1 ? "MQTT On" : "MQTT Off");
-		display.display();
+		rssi = LoRa.packetRssi(); // Načítanie sily signálu
+		onLoRaData();							// Spracuj LoRa data
 	}
 }
